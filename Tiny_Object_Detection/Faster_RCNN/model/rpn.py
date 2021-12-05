@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as pat
+from Tiny_Object_Detection.Faster_RCNN.utils.anchors import FCNAnchors, nms
 
 class RPN(nn.Module):
     '''
@@ -19,108 +20,112 @@ class RPN(nn.Module):
         # 基本 anchor 的 放大倍数
         self._scale = [8, 16, 32]
         self._base_size = 16
+        self.n_pre_nms = 3000
+        self.n_post_nms = 300
+        self.nms_thresh = 0.7
         self._feature_size = feature_size # 输入 特征图大小 [26,26]
         self._rpn_stride = stride
         self.training = training
 
         # Anchor 生成
-        self._anchors = self._generate_anchors()
+        self._anchors = FCNAnchors()
+        self.n_anchors = len(self._scale) * len(self._ratio)
 
+        # rpn 网络
         self.base_conv = nn.Conv2d(in_channels, 512, kernel_size=(3,3), padding=(1,1))
-        self.cls_conv = nn.Conv2d(512, out_channels=18, kernel_size=(1,1))
-        self.reg_conv = nn.Conv2d(512, out_channels=36, kernel_size=(1, 1))
+        self.cls_conv = nn.Conv2d(512, out_channels=self.n_anchors*3, kernel_size=(1,1))
+        self.reg_conv = nn.Conv2d(512, out_channels=self.n_anchors*4, kernel_size=(1, 1))
 
-    def _generate_anchors(self):
-        # # 1. 产生 base anchor
-        # 生成 多尺度 anchor 的 w h
-        size = self._base_size * self._base_size
-        size_ratios = size / np.array(self._ratio)
-        # round()方法返回x的四舍五入的数字，sqrt()方法返回数字x的平方根
-        ws = np.round(np.sqrt(size_ratios))  # ws:[23 16 11]
-        hs = np.round(ws * self._ratio)  # hs:[12 16 22],ws和hs一一对应
+    def _gen_proposals(self, anchors, locs):
+        '''
+        anchors: [x_l, y_l, x_r, y_r]
+        locs: [t_c, t_c, t_w, t_h]
+        '''
+        bbxes_width = anchors[:, 2] - anchors[:, 0]
+        boxes_height = anchors[:, 3] - anchors[:, 1]
+        boxes_xc = anchors[:, 0] + 0.5 * bbxes_width
+        boxes_yc = anchors[:, 1] + 0.5 * boxes_height
 
-        base_anchors = []
+        tx = locs[:, 0::4]
+        ty = locs[:, 1::4]
+        tw = locs[:, 2::4]
+        th = locs[:, 3::4]
 
-        for w,h in zip(ws, hs):
-            for scale in self._scale:
-                anchor = [0, 0] + [w*scale, h*scale]
-                base_anchors.append(anchor)
+        ctr_x = tx * bbxes_width[:, np.newaxis] + boxes_xc[:, np.newaxis]
+        ctr_y = ty * boxes_height[:, np.newaxis] + boxes_yc[:, np.newaxis]
+        w = np.exp(tw) * bbxes_width[:, np.newaxis]
+        h = np.exp(th) * boxes_height[:, np.newaxis]
 
-        # # 1. 产生 所有 anchor = base anchor + offset
-        x_offsets = np.arange(0, self._feature_size)
-        y_offsets = np.arange(0, self._feature_size)
+        dst_bbox = np.zeros(locs.shape, dtype=locs.dtype)
+        dst_bbox[:, 0::4] = ctr_x - 0.5 * w
+        dst_bbox[:, 1::4] = ctr_y - 0.5 * h
+        dst_bbox[:, 2::4] = ctr_x + 0.5 * w
+        dst_bbox[:, 3::4] = ctr_y + 0.5 * h
 
-        # 返回的 anchor 是映射在原图上的坐标 [x_c, y_c, w, h]
-        anchors = []
-        for x_o in x_offsets:
-            for y_o in y_offsets:
-                for anchor in base_anchors:
-                    anchors.append([x_o * self._rpn_stride, y_o * self._rpn_stride] + anchor[2:])
-
-        anchors = np.array(anchors)
-
-        # # 显示 anchors
-        # plt.figure(figsize=(10, 10))
-        # img = np.ones((416, 416, 3))
-        # plt.imshow(img)
-        # Axs = plt.gca()
-        # for i in range(anchors.shape[0]):
-        #     anchor = anchors[i]
-        #     rec = pat.Rectangle((anchor[0] - anchor[2] // 2, anchor[1] - anchor[3] // 2),
-        #                         anchor[2], anchor[3],
-        #                         edgecolor='r',
-        #                         facecolor='none')
-        #     Axs.add_patch(rec)
-        # plt.show()
-
-        return anchors
+        return dst_bbox
 
     def _filter_boxes(self, boxes, scores):
-        sorted_scores, sorted_boxes_idx = torch.sort(scores, dim=0, descending=True)
-        proposals = boxes[sorted_boxes_idx]
+        img_width = self._feature_size * self._rpn_stride
+        img_height = self._feature_size * self._rpn_stride
 
+        # proposals 的坐标截取
+        boxes[:, slice(0, 4, 2)] = np.clip(boxes[:, slice(0, 4, 2)], 0, img_width)
+        boxes[:, slice(1, 4, 2)] = np.clip(boxes[:, slice(1, 4, 2)], 0, img_height)
+
+        # 宽高的最小值不可以小于16
+        min_size = 16
+        # 计算高宽
+        ws = boxes[:, 2] - boxes[:, 0]
+        hs = boxes[:, 3] - boxes[:, 1]
+        # 防止建议框过小
+        keep = np.where((hs >= min_size) & (ws >= min_size))[0]
+        boxes = boxes[keep, :]
+        scores = scores[keep]
+
+        # 排序 从小到大 逆序获得最大的那些score
+        order = scores.ravel().argsort()[::-1]
+
+        # 第一次筛选proposal 只选前n_pre_nms（3000）个
+        if self.n_pre_nms > 0:
+            order = order[:self.n_pre_nms]
+
+        # NMS 
+        boxes = boxes[order, :]
+        scores = scores[order]
+
+        proposals = nms(boxes, scores, self.nms_thresh)
+
+        proposals = torch.Tensor(proposals)
+
+        return proposals[:self.n_post_nms]
 
     def forward(self, x):
+        batch = x.shape[0]
+
         # 获取网络类别预测输出
         base = self.base_conv(x)
         rpn_conv = F.relu(base)
 
-        rpn_cls = self.cls_conv(rpn_conv)
-        rpn_cls_reshape = rpn_cls.reshape(1, 2, 9*self._feature_size, self._feature_size)
-        rpn_cls_prob_reshape = F.softmax(rpn_cls_reshape, 1)
-
-        rpn_cls_prob = rpn_cls_prob_reshape.reshape(1, 18, self._feature_size, self._feature_size)
         rpn_reg_offset = self.reg_conv(rpn_conv)
+        rpn_locs = rpn_reg_offset.permute(0, 2, 3, 1).contiguous().reshape(batch, -1, 4)
 
-        # generate proposals
-        rpn_cls = rpn_cls_prob.permute(0,2,3,1).reshape(1, -1, 2)
-        rpn_reg = rpn_reg_offset.permute(0,2,3,1).reshape(1, -1, 4)
-        proposals = torch.zeros((self._feature_size*self._feature_size*9, 4))
-        scores = torch.zeros((self._feature_size*self._feature_size*9))
-        # anchor -> proposal
-        for i in range(proposals.shape[0]):
-            proposals[i, 0] = self._anchors[i, 0] + self._anchors[i, 2] * rpn_reg[0, i, 0]
-            proposals[i, 1] = self._anchors[i, 1] + self._anchors[i, 3] * rpn_reg[0, i, 1]
-            proposals[i, 2] = self._anchors[i, 2] + torch.exp(rpn_reg[0, i, 2])
-            proposals[i, 3] = self._anchors[i, 3] + torch.exp(rpn_reg[0, i, 3])
-            scores[i] = rpn_cls[0, i, 1]
+        rpn_cls = self.cls_conv(rpn_conv)
+        rpn_cls_reshape = rpn_cls.permute(0,2,3,1).contiguous().reshape(batch, -1, 2)
+        rpn_scores = F.softmax(rpn_cls_reshape, -1)
+
+        # 获取前景 score
+        rpn_fg_scores = rpn_scores[:,:,1]
+
+        # generate anchors
+        anchors = self._anchors()
+
+        # generate proposals  anchor -> proposal
+        proposals = self._gen_proposals(anchors, rpn_locs)
 
         # 筛选 proposal
-        self._filter_boxes(proposals, scores)
+        rois = self._filter_boxes(proposals, rpn_fg_scores)
 
-
-
-
-
-            
-
-
-
-
-
-
-
-
+        return rois, rpn_fg_scores
         
 if __name__ == '__main__':
     rpn = RPN()
