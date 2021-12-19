@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 def iou(bbox_a, bbox_b):
     lmax = max(bbox_a[0], bbox_b[0])
@@ -16,19 +17,34 @@ def iou(bbox_a, bbox_b):
 
 def nms(bboxes, thresh):
     results = []
+    
+    boxes = []
+    
+    for box in bboxes:
+        boxes.append(box)
 
-    while bboxes:
-        candidate = bboxes.pop(0)
+    while boxes:
+        candidate = boxes.pop(0)
 
         remains = []
-        for box in bboxes:
-            if box != candidate and iou(box, candidate) < thresh:
+        for box in boxes:
+            if (box != candidate).all() and iou(box, candidate) < thresh:
                 remains.append(box)
         
-        bboxes = remains
+        boxes = remains
         results.append(candidate)
 
     return results
+
+def bbox_overlaps(anchors, gt_boxes):
+    ious = np.zeros((anchors.shape[0], gt_boxes.shape[0])).astype(np.float32)
+
+    for i in range(anchors.shape[0]):
+        for j in range(gt_boxes.shape[0]):
+            ious[i,j] = iou(anchors[i], gt_boxes[j])
+
+    return torch.Tensor(ious)
+
 
 class FCNAnchors():
     def __init__(self, base_size=16,  feat_stride=16, f_size=(26,26), 
@@ -73,33 +89,8 @@ class FCNAnchors():
                 shift.reshape((K, 1, 4))  # （K，A，4）
         # 所有的先验框
         anchors = anchors.reshape((K * A, 4)).astype(np.float32) #（9*26*26,4）
-        return anchors
+        return torch.Tensor(anchors)
     
     def __call__(self):
         base_anchors = self._generate_anchor_base()
         return self._enumerate_shifted_anchor(base_anchors)
-
-
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    anchor_gen = FCNAnchors()
-    nine_anchors = anchor_gen()
-    print(nine_anchors)
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    plt.ylim(-300,900)
-    plt.xlim(-300,900)
-    shift_x = np.arange(0, width * feat_stride, feat_stride)
-    shift_y = np.arange(0, height * feat_stride, feat_stride)
-    shift_x, shift_y = np.meshgrid(shift_x, shift_y)
-    plt.scatter(shift_x,shift_y)
-    box_widths = anchors_all[:,2]-anchors_all[:,0]
-    box_heights = anchors_all[:,3]-anchors_all[:,1]
-    
-    for i in [108,109,110,111,112,113,114,115,116]:
-        rect = plt.Rectangle([anchors_all[i, 0],anchors_all[i, 1]],box_widths[i],box_heights[i],color="r",fill=False)
-        ax.add_patch(rect)
-    
-    plt.show()

@@ -141,3 +141,17 @@
                 $$L_{reg}(t_i, t_i^\star) = \sum_{i \in x,y,w,h} smooth_{L1}(t_i - t_i^\star)$$
 				
                  ![](./img/6.png)
+                 
+  - RoI pooling 层
+
+	- 算法原理
+
+		基于 rpn 输出的 ROIs 对   backbone 的共享特征层 进行截取 + 自适应 pooling 计算         
+        
+        ![](./img/1.gif)
+        
+ - RCNN Head 部分
+
+	最后的 Head 网路 对 输出的 bbox 进行精准分类和精准定位，实质是 fast rcnn 部分
+    
+    ![](./img/7.png)
