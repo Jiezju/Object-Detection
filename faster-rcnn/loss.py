@@ -24,7 +24,7 @@ class RPNLoss(nn.Module):
         outputs = []
 
         for i in range(batch):
-            outputs.append(target_bbox[i, :batch_counts])
+            outputs.append(target_bbox[i, :batch_counts[i]])
 
         return t.cat(outputs, dim=0)
 
@@ -32,10 +32,12 @@ class RPNLoss(nn.Module):
         batch = rpn_truth.shape[0]
         rpn_cls = t.squeeze(rpn_truth, dim=-1)
         rpn_bbox = pre_bbox[rpn_cls == 1]
-        batch_counts = t.sum((pre_bbox == 1).int(), dim=1)
+        batch_counts = t.sum((rpn_cls == 1).int(), dim=1)
         target_bbox = self.batch_pack(target_bbox, batch_counts, batch)
-        diff = t.abs(target_bbox - pre_bbox)
-        loss = diff[diff < 1.0] ** 2 * 0.5 + (1 - diff[diff < 1.0]) * (diff - 0.5)
+        if target_bbox.shape[0] != rpn_bbox.shape[0]:
+            rpn_bbox = rpn_bbox[:target_bbox.shape[0]]
+        diff = t.abs(target_bbox - rpn_bbox)
+        loss = diff[diff < 1.0] ** 2 * 0.5 + (1 - diff[diff < 1.0]) * (diff[diff < 1.0] - 0.5)
 
         if loss.size() == 0:
             return t.zeros(size=1).double()
@@ -50,8 +52,12 @@ class RPNLoss(nn.Module):
 if __name__ == "__main__":
     rpnloss = RPNLoss()
     cls_t = t.randint(-1, 2, size=(1, 576, 1))
+    pre_bbox = t.randn(1, 576, 4)
     logits = t.randn((1, 576, 2))
     logits = F.softmax(logits, dim=-1)
-    ls = rpnloss(cls_t, logits)
+    # ls = rpnloss(cls_t, logits)
+    target_box = t.randn(1, 100, 4)
+    loss = rpnloss(cls_t, logits, target_box, pre_bbox)
+
 
 
